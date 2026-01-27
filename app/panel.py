@@ -26,7 +26,7 @@ def build_panel(root: tk.Tk, buttons: list[str]) -> None:
             text=button_id,
             width=10,
             height=2,
-            command=lambda value=button_id: dispatcher.handle(value),
+            command=lambda value=button_id: dispatcher.handle(value, silent=True),
         )
         button.grid(row=row, column=column, padx=5, pady=5, sticky="nsew")
 
