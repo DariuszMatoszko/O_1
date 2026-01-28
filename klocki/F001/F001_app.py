@@ -29,7 +29,7 @@ def main() -> None:
 
     ensure_runtime_files()
     cleanup_sessions()
-    session_root = create_session(args.portal_key)
+    session_root = create_session(args.portal_key, args.number)
     session_info = session_paths(session_root)
 
     portals = load_json(portals_path(), {})
