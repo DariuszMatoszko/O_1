@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+*.pyo
+klocki/F001/_runtime/
