@@ -108,12 +108,18 @@ def _auto_detect_username(page: Any) -> Any:
     for label in ("Użytkownik", "Uzytkownik"):
         locator = _first_visible(
             page.locator(
-                f"xpath=//*[contains(normalize-space(.), '{label}')]/following::input[1]"
+                "xpath=//*[contains(normalize-space(.),"
+                f" '{label}')]/following::input[not(@type='hidden')"
+                " and not(@disabled)][1]"
             )
         )
         if locator:
             return locator
-    return _first_visible(page.locator("input:not([type='password'])"))
+    return _first_visible(
+        page.locator(
+            "input:not([type='hidden']):not([type='password']):not([disabled])"
+        )
+    )
 
 
 def _auto_detect_password(page: Any) -> Any:
@@ -123,7 +129,9 @@ def _auto_detect_password(page: Any) -> Any:
     for label in ("Hasło", "Haslo"):
         locator = _first_visible(
             page.locator(
-                f"xpath=//*[contains(normalize-space(.), '{label}')]/following::input[1]"
+                "xpath=//*[contains(normalize-space(.),"
+                f" '{label}')]/following::input[not(@type='hidden')"
+                " and not(@disabled)][1]"
             )
         )
         if locator:
@@ -140,6 +148,46 @@ def _auto_detect_submit(page: Any) -> Any:
     return _first_visible(page.get_by_text("Zaloguj", exact=False))
 
 
+def _locator_frame(locator: Any, fallback: Any) -> Any:
+    if not locator:
+        return fallback
+    try:
+        handle = locator.element_handle()
+    except Exception:
+        return fallback
+    if not handle:
+        return fallback
+    try:
+        return handle.owner_frame() or fallback
+    except Exception:
+        return fallback
+
+
+def _same_element(first: Any, second: Any) -> bool:
+    if not first or not second:
+        return False
+    try:
+        first_handle = first.element_handle()
+        second_handle = second.element_handle()
+    except Exception:
+        return False
+    if not first_handle or not second_handle:
+        return False
+    try:
+        return first_handle.evaluate("(el, other) => el === other", second_handle)
+    except Exception:
+        return False
+
+
+def _visible_input_from_label(frame: Any, label: str) -> Any:
+    return _first_visible(
+        frame.locator(
+            "xpath=//*[contains(normalize-space(),"
+            f" '{label}')]/following::input[not(@type='hidden') and not(@disabled)][1]"
+        )
+    )
+
+
 def find_login_in_any_frame(page: Any) -> Optional[tuple[Any, Any, Any, Any]]:
     frames = [page.main_frame]
     frames.extend(frame for frame in page.frames if frame != page.main_frame)
@@ -153,25 +201,23 @@ def find_login_in_any_frame(page: Any) -> Optional[tuple[Any, Any, Any, Any]]:
             if not (has_login_text or has_password):
                 continue
 
-            user_locator = _first_visible(
-                frame.locator(
-                    "xpath=//*[contains(normalize-space(), 'Użytkownik')]/following::input[1]"
-                )
-            )
+            user_locator = _visible_input_from_label(frame, "Użytkownik")
+            if not user_locator:
+                user_locator = _visible_input_from_label(frame, "Uzytkownik")
             if not user_locator:
                 user_locator = _first_visible(
                     frame.locator(
-                        "input:not([type='hidden']):not([type='password']):not([type='submit']):not([type='button'])"
+                        "input:not([type='hidden']):not([type='password']):not([type='submit']):not([type='button']):not([disabled])"
                     )
                 )
 
-            pass_locator = _first_visible(
-                frame.locator(
-                    "xpath=//*[contains(normalize-space(), 'Hasło')]/following::input[1]"
-                )
-            )
+            pass_locator = _first_visible(frame.locator("input[type='password']"))
             if not pass_locator:
-                pass_locator = _first_visible(frame.locator("input[type='password']"))
+                pass_locator = _visible_input_from_label(frame, "Hasło")
+            if not pass_locator:
+                pass_locator = _visible_input_from_label(frame, "Haslo")
+            if not pass_locator:
+                pass_locator = None
 
             submit_locator = _first_visible(frame.locator("button:has-text('Zaloguj')"))
             if not submit_locator:
@@ -183,10 +229,73 @@ def find_login_in_any_frame(page: Any) -> Optional[tuple[Any, Any, Any, Any]]:
                     frame.locator("input[type='button'][value*='Zaloguj']")
                 )
 
-            if user_locator and pass_locator:
+            if user_locator and pass_locator and not _same_element(user_locator, pass_locator):
                 return frame, user_locator, pass_locator, submit_locator
         time.sleep(0.5)
     return None
+
+
+def _login_form_visible(frame: Any) -> bool:
+    if not frame:
+        return False
+    try:
+        user_label = _first_visible(frame.locator("text=Użytkownik"))
+        pass_label = _first_visible(frame.locator("text=Hasło"))
+        submit = _first_visible(frame.get_by_role("button", name=re.compile("Zaloguj", re.I)))
+        if not submit:
+            submit = _first_visible(frame.locator("button:has-text('Zaloguj')"))
+        return bool(user_label and pass_label and submit)
+    except Exception:
+        return False
+
+
+def _click_okish_things(page: Any, log_path: str) -> None:
+    okish_regex = re.compile(
+        r"\b(OK|Dalej|Kontynuuj|Akceptuj|Zgadzam|Rozumiem|Zamknij)\b",
+        re.I,
+    )
+    click_limit = 5
+    clicked_total = 0
+    frames = [page.main_frame]
+    frames.extend(frame for frame in page.frames if frame != page.main_frame)
+    for _ in range(click_limit):
+        if clicked_total >= click_limit:
+            break
+        clicked_any = False
+        for frame in frames:
+            try:
+                locator = frame.locator(
+                    "button, [role='button'], input[type='button'], input[type='submit'], a"
+                )
+                count = locator.count()
+            except Exception:
+                continue
+            for idx in range(count):
+                if clicked_total >= click_limit:
+                    break
+                item = locator.nth(idx)
+                try:
+                    if not item.is_visible():
+                        continue
+                    text = (item.text_content() or "").strip()
+                    value_text = (item.get_attribute("value") or "").strip()
+                except Exception:
+                    continue
+                if not okish_regex.search(text) and not okish_regex.search(value_text):
+                    continue
+                try:
+                    item.click()
+                except Exception:
+                    continue
+                clicked_any = True
+                clicked_total += 1
+                _log_event(log_path, f"STEP_04_CLICK_OK_LOOP: Clicked okish ({text or value_text}).")
+                try:
+                    page.wait_for_timeout(800)
+                except Exception:
+                    pass
+        if not clicked_any:
+            break
 
 
 def _write_login_probe(log_path: str, page: Any) -> None:
@@ -337,13 +446,24 @@ def run_portal_flow(
     url = portal_data.get("url")
     login = portal_data.get("login")
     password = portal_data.get("password")
-    if not url or not login or not password:
+    if not url:
         _log_event(log_path, "STEP_00_MISSING_PORTAL_DATA: Missing portal credentials.")
         return PortalRunResult(
             status="failed",
             last_step="STEP_00_MISSING_PORTAL_DATA",
             message="Brak danych portalu",
             detail="url/login/password",
+            found=False,
+        )
+    if not login or not password:
+        last_step = "STEP_02_CREDENTIALS_MISSING"
+        message = "Brak loginu lub hasła do portalu"
+        _log_event(log_path, f"{last_step}: {message}")
+        return PortalRunResult(
+            status="failed",
+            last_step=last_step,
+            message=message,
+            detail="login/password",
             found=False,
         )
 
@@ -353,6 +473,7 @@ def run_portal_flow(
             _log_event(log_path, "STEP_01_OPEN_URL: Launching browser.")
             browser = playwright.chromium.launch(headless=False)
             page = browser.new_page()
+            page.on("dialog", lambda dialog: dialog.accept())
             page.goto(url, timeout=30_000)
             page.wait_for_load_state("domcontentloaded")
             if debug:
@@ -373,10 +494,11 @@ def run_portal_flow(
             password_locator = _locator_from_selector(page, password_selector)
             submit_locator = _locator_from_selector(page, submit_selector)
 
+            login_frame = page.main_frame
             if not username_locator or not password_locator:
                 detected = find_login_in_any_frame(page)
                 if detected:
-                    _, username_locator, password_locator, detected_submit = detected
+                    login_frame, username_locator, password_locator, detected_submit = detected
                     if not submit_locator:
                         submit_locator = detected_submit
 
@@ -387,14 +509,58 @@ def run_portal_flow(
             if not submit_locator:
                 submit_locator = _auto_detect_submit(page)
 
+            if _same_element(username_locator, password_locator):
+                password_locator = None
+
             if not username_locator or not password_locator:
                 return _login_inputs_not_found(
                     log_path, critical_path, page, screens_dir
                 )
 
+            login_frame = _locator_frame(username_locator, login_frame)
+
             _log_event(log_path, "STEP_02_LOGIN_FILL: Filling login form.")
+            username_locator.click()
             username_locator.fill(login)
+            password_locator.click()
             password_locator.fill(password)
+            try:
+                user_len = len(username_locator.input_value())
+            except Exception:
+                user_len = len(login or "")
+            try:
+                pass_len = len(password_locator.input_value())
+            except Exception:
+                pass_len = 0
+            _log_event(
+                log_path,
+                f"STEP_02_LOGIN_FILL: user_len={user_len}, password_len={pass_len}",
+            )
+            if pass_len == 0:
+                password_locator.click()
+                password_locator.press("Control+A")
+                password_locator.type(password, delay=25)
+                try:
+                    pass_len = len(password_locator.input_value())
+                except Exception:
+                    pass_len = 0
+                _log_event(
+                    log_path,
+                    f"STEP_02_LOGIN_FILL: password_len={pass_len} after fallback",
+                )
+                if pass_len == 0:
+                    last_step = "STEP_02_PASSWORD_NOT_SET"
+                    message = "Nie udało się wpisać hasła w pole hasła"
+                    _log_event(log_path, f"{last_step}: {message}")
+                    screenshot_path = _take_screenshot(page, screens_dir, last_step)
+                    return PortalRunResult(
+                        status="failed",
+                        last_step=last_step,
+                        message=message,
+                        detail="password",
+                        found=False,
+                        screenshot_path=screenshot_path,
+                    )
             if debug:
                 _take_screenshot(page, screens_dir, "STEP_02_LOGIN_FILL")
 
@@ -406,7 +572,12 @@ def run_portal_flow(
                     password_locator.press("Enter")
                 except Exception:
                     page.keyboard.press("Enter")
-            page.wait_for_timeout(2_000)
+            page.wait_for_load_state("domcontentloaded")
+            start_time = time.time()
+            while time.time() - start_time < 5:
+                if not _login_form_visible(login_frame):
+                    break
+                page.wait_for_timeout(500)
 
             password_error_selector = selectors.get("password_error")
             if password_error_selector and page.locator(password_error_selector).count() > 0:
@@ -425,18 +596,32 @@ def run_portal_flow(
             if debug:
                 _take_screenshot(page, screens_dir, "STEP_03_LOGIN_SUBMIT")
 
-            ok_selector = selectors.get("ok_button")
-            if not ok_selector:
-                return _missing_selector_result(
-                    "STEP_04", "ok_button", log_path, critical_path, page, screens_dir
+            if _login_form_visible(login_frame):
+                last_step = "STEP_03_LOGIN_FAILED_STILL_ON_FORM"
+                message = (
+                    "Logowanie nie powiodło się (nadal widzę formularz). "
+                    "Możliwe złe hasło albo nie kliknęło."
+                )
+                _log_event(log_path, f"{last_step}: {message}")
+                screenshot_path = _take_screenshot(page, screens_dir, last_step)
+                return PortalRunResult(
+                    status="failed",
+                    last_step=last_step,
+                    message=message,
+                    detail="login_form_visible",
+                    found=False,
+                    screenshot_path=screenshot_path,
                 )
 
+            ok_selector = selectors.get("ok_button")
             _log_event(log_path, "STEP_04_CLICK_OK_LOOP: Clicking OK dialogs.")
-            for _ in range(5):
-                if page.locator(ok_selector).count() == 0:
-                    break
-                page.click(ok_selector)
-                page.wait_for_timeout(1_000)
+            if ok_selector:
+                for _ in range(5):
+                    if page.locator(ok_selector).count() == 0:
+                        break
+                    page.click(ok_selector)
+                    page.wait_for_timeout(1_000)
+            _click_okish_things(page, log_path)
             if debug:
                 _take_screenshot(page, screens_dir, "STEP_04_CLICK_OK_LOOP")
 

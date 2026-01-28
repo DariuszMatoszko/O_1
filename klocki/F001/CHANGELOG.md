@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-01-31
+- PATCH: pewne logowanie (walidacja wpisania hasła) + auto-OK bez ok_button.
+
 ## 2026-01-28
 - Przeniesiono pliki runtime do `klocki/F001/_runtime/` i dodano obsługę sesji z rotacją 14 dni.
 - Dodano panel `F001_panel.py` z wyborem powiatu, danymi portalu i obsługą błędów ze screenshotem.
