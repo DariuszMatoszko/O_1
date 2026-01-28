@@ -4,5 +4,9 @@ klocki/F001_runtime/
 
 # Python cache
 __pycache__/
+**/__pycache__/
 *.pyc
 *.pyo
+
+# F002 runtime
+klocki/F002_runtime/
