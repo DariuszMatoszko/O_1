@@ -256,66 +256,128 @@ def _all_frames(page: Any) -> list[Any]:
     return frames
 
 
-def dismiss_ok_dialogs(page: Any, log_path: str) -> None:
+def dismiss_ok_dialogs(page: Any) -> None:
     okish_regex = re.compile(
-        r"\b(OK|Dalej|Kontynuuj|Zamknij|Akceptuj|Zgadzam|Rozumiem)\b",
+        r"^\s*(OK|Dalej|Kontynuuj|Zamknij|Akceptuj|Zgadzam|Rozumiem)\s*$",
         re.I,
     )
-    click_limit = 10
-    clicked_total = 0
-    last_seen = time.time()
     try:
         page.on("dialog", lambda dialog: dialog.accept())
     except Exception:
         pass
 
-    while clicked_total < click_limit:
+    try:
+        page.wait_for_timeout(600)
+    except Exception:
+        pass
+
+    deadline = time.time() + 8
+    last_seen = time.time()
+    while time.time() < deadline:
         clicked_any = False
-        frames = _all_frames(page)
-        for frame in frames:
+        saw_dialog = False
+        try:
+            dialog_locator = page.locator("div.ui-dialog")
+            dialog_count = dialog_locator.count()
+        except Exception:
+            dialog_count = 0
+
+        for idx in range(dialog_count):
+            dialog = dialog_locator.nth(idx)
             try:
-                locator = frame.locator(
-                    "button, [role='button'], input[type='button'], input[type='submit'], a"
-                )
-                count = locator.count()
+                if not dialog.is_visible():
+                    continue
             except Exception:
                 continue
-            for idx in range(count):
-                if clicked_total >= click_limit:
-                    break
-                item = locator.nth(idx)
+            saw_dialog = True
+            try:
+                button_locator = dialog.locator("div.ui-dialog-buttonpane button")
+                button_count = button_locator.count()
+            except Exception:
+                continue
+            for button_idx in range(button_count):
+                button = button_locator.nth(button_idx)
                 try:
-                    if not item.is_visible():
+                    if not button.is_visible():
                         continue
-                    text = (item.text_content() or "").strip()
-                    value_text = (item.get_attribute("value") or "").strip()
+                    text = (button.text_content() or "").strip()
                 except Exception:
                     continue
-                if not okish_regex.search(text) and not okish_regex.search(value_text):
+                if not okish_regex.match(text):
                     continue
                 try:
-                    item.click()
+                    button.scroll_into_view_if_needed()
+                    button.click(force=True, timeout=1500)
                 except Exception:
                     continue
                 clicked_any = True
-                clicked_total += 1
                 last_seen = time.time()
-                _log_event(
-                    log_path,
-                    f"STEP_04_CLICK_OK_LOOP: Clicked okish ({text or value_text}).",
-                )
                 try:
                     page.wait_for_timeout(int(random.uniform(300, 700)))
                 except Exception:
                     pass
+                break
+
         if clicked_any:
             continue
-        if time.time() - last_seen >= 1.0:
+        if not saw_dialog and time.time() - last_seen >= 1.0:
             break
         try:
-            page.wait_for_timeout(200)
+            page.wait_for_timeout(250)
         except Exception:
             break
+
+
+def get_frame_centr(page: Any) -> Any:
+    deadline = time.time() + 8
+    frame = None
+    while time.time() < deadline:
+        try:
+            frame = page.frame(name="frame_centr")
+        except Exception:
+            frame = None
+        if frame is not None:
+            return frame
+        try:
+            page.wait_for_timeout(250)
+        except Exception:
+            break
+    return frame
+
+
+def open_list(page: Any, kind: str) -> bool:
+    if kind == "unfinished":
+        selector = "form#form_kerglista input[type=submit]"
+    else:
+        selector = "form#form_kerglistaz input[type=submit]"
+    locator = _first_visible(page.locator(selector))
+    if not locator:
+        return False
+    try:
+        locator.click()
+    except Exception:
+        return False
+    frame = get_frame_centr(page)
+    if frame:
+        try:
+            frame.wait_for_load_state("domcontentloaded")
+        except Exception:
+            pass
+    dismiss_ok_dialogs(page)
+    return True
+
+
+def find_number_in_frame(frame: Any, number: str) -> Any:
+    if not frame:
+        return None
+    locator = _first_visible(frame.get_by_text(number, exact=False))
+    if locator:
+        return locator
+    parts = [part for part in re.split(r"\W+", number) if part]
+    if not parts:
+        return None
+    regex = re.compile(r"\W*".join(re.escape(part) for part in parts), re.I)
+    return _first_visible(frame.get_by_text(regex, exact=False))
 
 
 def _write_login_probe(log_path: str, page: Any) -> None:
@@ -492,27 +554,64 @@ def _find_number_match(page: Any, number: str) -> Any:
 
 def _export_work_artifacts(
     page: Any,
+    frame: Any,
     session_root: str,
     screens_dir: str,
     log_path: str,
 ) -> Optional[str]:
     exports_dir = os.path.join(session_root, "exports")
     os.makedirs(exports_dir, exist_ok=True)
-    html_path = os.path.join(exports_dir, "work.html")
-    text_path = os.path.join(exports_dir, "work.txt")
+    main_html_path = os.path.join(exports_dir, "main.html")
+    main_text_path = os.path.join(exports_dir, "main.txt")
+    frame_html_path = os.path.join(exports_dir, "frame_centr.html")
+    frame_text_path = os.path.join(exports_dir, "frame_centr.txt")
     screenshot_path = os.path.join(screens_dir, "work_opened.png")
     try:
-        with open(html_path, "w", encoding="utf-8") as handle:
+        with open(main_html_path, "w", encoding="utf-8") as handle:
             handle.write(page.content())
-        _log_event(log_path, f"STEP_08_EXPORT_WORK: saved {html_path}")
+        _log_event(log_path, f"STEP_08_EXPORT_WORK: saved {main_html_path}")
     except Exception as exc:
         _log_event(log_path, f"STEP_08_EXPORT_WORK: failed to save html ({exc})")
     try:
-        with open(text_path, "w", encoding="utf-8") as handle:
+        with open(main_text_path, "w", encoding="utf-8") as handle:
             handle.write(page.locator("body").inner_text())
-        _log_event(log_path, f"STEP_08_EXPORT_WORK: saved {text_path}")
+        _log_event(log_path, f"STEP_08_EXPORT_WORK: saved {main_text_path}")
     except Exception as exc:
         _log_event(log_path, f"STEP_08_EXPORT_WORK: failed to save text ({exc})")
+    if frame:
+        try:
+            with open(frame_html_path, "w", encoding="utf-8") as handle:
+                handle.write(frame.content())
+            _log_event(log_path, f"STEP_08_EXPORT_WORK: saved {frame_html_path}")
+        except Exception as exc:
+            _log_event(
+                log_path, f"STEP_08_EXPORT_WORK: failed to save frame html ({exc})"
+            )
+        try:
+            with open(frame_text_path, "w", encoding="utf-8") as handle:
+                handle.write(frame.locator("body").inner_text())
+            _log_event(log_path, f"STEP_08_EXPORT_WORK: saved {frame_text_path}")
+        except Exception as exc:
+            _log_event(
+                log_path, f"STEP_08_EXPORT_WORK: failed to save frame text ({exc})"
+            )
+    else:
+        try:
+            with open(frame_html_path, "w", encoding="utf-8") as handle:
+                handle.write("")
+            _log_event(log_path, f"STEP_08_EXPORT_WORK: saved {frame_html_path}")
+        except Exception as exc:
+            _log_event(
+                log_path, f"STEP_08_EXPORT_WORK: failed to save frame html ({exc})"
+            )
+        try:
+            with open(frame_text_path, "w", encoding="utf-8") as handle:
+                handle.write("")
+            _log_event(log_path, f"STEP_08_EXPORT_WORK: saved {frame_text_path}")
+        except Exception as exc:
+            _log_event(
+                log_path, f"STEP_08_EXPORT_WORK: failed to save frame text ({exc})"
+            )
     try:
         page.screenshot(path=screenshot_path, full_page=True)
         _log_event(log_path, f"STEP_08_EXPORT_WORK: saved {screenshot_path}")
@@ -724,20 +823,12 @@ def run_portal_flow(
                 )
 
             _log_event(log_path, "STEP_04_CLICK_OK_LOOP: Clicking OK dialogs.")
-            dismiss_ok_dialogs(page, log_path)
+            dismiss_ok_dialogs(page)
             if debug:
                 _take_screenshot(page, screens_dir, "STEP_04_CLICK_OK_LOOP")
 
-            nav_selector = selectors.get("roboty_niezakonczone_link")
             _log_event(log_path, "STEP_05_NAV_ROBOTY_NIEZAKONCZONE: Navigating.")
-            nav_locator = None
-            deadline = time.time() + 10
-            while time.time() < deadline and not nav_locator:
-                nav_locator = _find_unfinished_link(page, nav_selector)
-                if nav_locator:
-                    break
-                page.wait_for_timeout(400)
-            if not nav_locator:
+            if not open_list(page, "unfinished"):
                 last_step = "STEP_05_NAV_UNFINISHED_NOT_FOUND"
                 message = "Nie znalazłem przycisku Lista prac niezakończonych"
                 _log_event(log_path, f"{last_step}: {message}")
@@ -747,65 +838,69 @@ def run_portal_flow(
                     status="failed",
                     last_step=last_step,
                     message=message,
-                    detail="roboty_niezakonczone_link",
+                    detail="form_kerglista",
                     found=False,
                     screenshot_path=screenshot_path,
                 )
-            nav_locator.click()
-            page.wait_for_timeout(1_000)
-            dismiss_ok_dialogs(page, log_path)
-            if debug:
-                _take_screenshot(page, screens_dir, "STEP_05_NAV_ROBOTY_NIEZAKONCZONE")
 
-            _log_event(log_path, "STEP_06_SEARCH_NUMBER: Searching for number.")
-            search_input = _find_label_input(page, "Zgłoszenie")
-            submit_button = _find_submit_button(page, "Wyślij zapytanie")
-            if not search_input or not submit_button:
-                last_step = "STEP_06_SEARCH_UI_NOT_FOUND"
-                message = "Nie znalazłem pola Zgłoszenie lub przycisku Wyślij zapytanie"
-                _log_event(log_path, f"{last_step}: {message}")
-                _log_critical(critical_path, f"{last_step}: {message}")
-                screenshot_path = _take_screenshot(page, screens_dir, last_step)
-                return PortalRunResult(
-                    status="failed",
-                    last_step=last_step,
-                    message=message,
-                    detail="zgłoszenie/wyślij zapytanie",
-                    found=False,
-                    screenshot_path=screenshot_path,
-                )
-            search_input.click()
-            search_input.fill(number)
-            submit_button.click()
-            try:
-                page.wait_for_load_state("domcontentloaded")
-            except Exception:
-                pass
-            for _ in range(6):
-                page.wait_for_timeout(300)
+            frame = get_frame_centr(page)
+            hit = find_number_in_frame(frame, number)
+            if not hit:
+                _log_event(log_path, "STEP_06_NAV_ROBOTY_ZAKONCZONE: Navigating.")
+                if not open_list(page, "finished"):
+                    last_step = "STEP_06_NAV_FINISHED_NOT_FOUND"
+                    message = "Nie znalazłem przycisku Lista prac zakończonych"
+                    _log_event(log_path, f"{last_step}: {message}")
+                    _log_critical(critical_path, f"{last_step}: {message}")
+                    screenshot_path = _take_screenshot(page, screens_dir, last_step)
+                    return PortalRunResult(
+                        status="failed",
+                        last_step=last_step,
+                        message=message,
+                        detail="form_kerglistaz",
+                        found=False,
+                        screenshot_path=screenshot_path,
+                    )
+                frame = get_frame_centr(page)
+                hit = find_number_in_frame(frame, number)
 
-            if debug:
-                _take_screenshot(page, screens_dir, "STEP_06_SEARCH_NUMBER")
-
-            _log_event(log_path, "STEP_07_VALIDATE_FOUND: Validating result.")
-            found = False
-            match_locator = _find_number_match(page, number)
-            if match_locator:
-                try:
-                    match_locator.click()
-                    found = True
-                except Exception:
-                    found = False
-            if not found:
+            if not hit:
                 last_step = "STEP_07_NUMBER_NOT_FOUND"
                 message = "Nie znaleziono numeru zgłoszenia"
                 _log_event(log_path, f"{last_step}: {message}")
                 _log_critical(critical_path, f"{last_step}: {message}")
-            if debug:
-                _take_screenshot(page, screens_dir, "STEP_07_VALIDATE_FOUND")
+                screenshot_path = _export_work_artifacts(
+                    page,
+                    frame,
+                    session_info["session_root"],
+                    screens_dir,
+                    log_path,
+                )
+                browser.close()
+                return PortalRunResult(
+                    status="failed",
+                    last_step=last_step,
+                    message=message,
+                    detail=number,
+                    found=False,
+                    screenshot_path=screenshot_path,
+                )
+
+            last_step = "STEP_07_NUMBER_FOUND"
+            try:
+                hit.click(force=True)
+            except Exception:
+                _log_event(log_path, f"{last_step}: failed to click match")
+            if frame:
+                try:
+                    frame.wait_for_load_state("domcontentloaded")
+                except Exception:
+                    pass
+            dismiss_ok_dialogs(page)
 
             screenshot_path = _export_work_artifacts(
                 page,
+                frame,
                 session_info["session_root"],
                 screens_dir,
                 log_path,
@@ -813,10 +908,10 @@ def run_portal_flow(
             browser.close()
             return PortalRunResult(
                 status="success",
-                last_step="STEP_07_VALIDATE_FOUND" if found else "STEP_07_NUMBER_NOT_FOUND",
-                message="Znaleziono" if found else "Nie znaleziono",
+                last_step=last_step,
+                message="Znaleziono",
                 detail=number,
-                found=found,
+                found=True,
                 screenshot_path=screenshot_path,
             )
     except PlaywrightTimeout as exc:
