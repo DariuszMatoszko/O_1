@@ -1,4 +1,8 @@
-**/__pycache__/**
-**/*.pyc
+# F001 runtime (logi/screeny/eksporty/stan) – NIE W GIT
+klocki/F001/_runtime/
+klocki/F001_runtime/
+
+# Python cache
+__pycache__/
+*.pyc
 *.pyo
-klocki/F001_runtime/**
