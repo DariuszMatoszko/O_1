@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-02-01
+- PATCH: multi-OK (1..N komunikatów), nawigacja do listy niezakończonych bez selektorów, wyszukiwanie po Zgłoszenie, eksport work.txt/html.
+
 ## 2026-01-31
 - PATCH: pewne logowanie (walidacja wpisania hasła) + auto-OK bez ok_button.
 
