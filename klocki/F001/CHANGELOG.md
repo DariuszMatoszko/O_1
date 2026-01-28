@@ -10,3 +10,7 @@
 ## 2026-01-29
 - Naprawa: logowanie działa bez selectors.json (auto wykrywanie Użytkownik/Hasło/Zaloguj).
 - Powód: STEP_02_MISSING_SELECTOR.
+
+## 2026-01-30
+- PATCH: logowanie skanuje iframe + szuka po tekstach Użytkownik/Hasło/Zaloguj, dodano login_probe.json (bez haseł).
+- Naprawa kroku: STEP_02_LOGIN_INPUTS_NOT_FOUND.

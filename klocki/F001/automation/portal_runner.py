@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
@@ -139,6 +140,115 @@ def _auto_detect_submit(page: Any) -> Any:
     return _first_visible(page.get_by_text("Zaloguj", exact=False))
 
 
+def find_login_in_any_frame(page: Any) -> Optional[tuple[Any, Any, Any, Any]]:
+    frames = [page.main_frame]
+    frames.extend(frame for frame in page.frames if frame != page.main_frame)
+    for _ in range(30):
+        for frame in frames:
+            try:
+                has_login_text = frame.locator("text=Użytkownik").count() > 0
+                has_password = frame.locator("input[type='password']").count() > 0
+            except Exception:
+                continue
+            if not (has_login_text or has_password):
+                continue
+
+            user_locator = _first_visible(
+                frame.locator(
+                    "xpath=//*[contains(normalize-space(), 'Użytkownik')]/following::input[1]"
+                )
+            )
+            if not user_locator:
+                user_locator = _first_visible(
+                    frame.locator(
+                        "input:not([type='hidden']):not([type='password']):not([type='submit']):not([type='button'])"
+                    )
+                )
+
+            pass_locator = _first_visible(
+                frame.locator(
+                    "xpath=//*[contains(normalize-space(), 'Hasło')]/following::input[1]"
+                )
+            )
+            if not pass_locator:
+                pass_locator = _first_visible(frame.locator("input[type='password']"))
+
+            submit_locator = _first_visible(frame.locator("button:has-text('Zaloguj')"))
+            if not submit_locator:
+                submit_locator = _first_visible(
+                    frame.locator("input[type='submit'][value*='Zaloguj']")
+                )
+            if not submit_locator:
+                submit_locator = _first_visible(
+                    frame.locator("input[type='button'][value*='Zaloguj']")
+                )
+
+            if user_locator and pass_locator:
+                return frame, user_locator, pass_locator, submit_locator
+        time.sleep(0.5)
+    return None
+
+
+def _write_login_probe(log_path: str, page: Any) -> None:
+    logs_dir = os.path.dirname(log_path)
+    os.makedirs(logs_dir, exist_ok=True)
+    probe_path = os.path.join(logs_dir, "login_probe.json")
+    if page is None:
+        payload = {"title": "", "url": "", "frames": []}
+        with open(probe_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        return
+
+    frames_payload: list[dict[str, Any]] = []
+    for frame in page.frames:
+        inputs_payload: list[dict[str, Optional[str]]] = []
+        try:
+            input_locator = frame.locator("input")
+            input_count = input_locator.count()
+            password_count = frame.locator("input[type='password']").count()
+            has_user_text = frame.locator("text=Użytkownik").count() > 0
+            has_haslo_text = frame.locator("text=Hasło").count() > 0
+        except Exception:
+            input_count = 0
+            password_count = 0
+            has_user_text = False
+            has_haslo_text = False
+
+        for idx in range(input_count):
+            try:
+                item = input_locator.nth(idx)
+                inputs_payload.append(
+                    {
+                        "type": item.get_attribute("type"),
+                        "id": item.get_attribute("id"),
+                        "name": item.get_attribute("name"),
+                        "placeholder": item.get_attribute("placeholder"),
+                        "ariaLabel": item.get_attribute("aria-label"),
+                    }
+                )
+            except Exception:
+                continue
+
+        frames_payload.append(
+            {
+                "url": frame.url,
+                "inputs": inputs_payload,
+                "passwordCount": password_count,
+                "inputCount": input_count,
+                "hasUserText": has_user_text,
+                "hasHasloText": has_haslo_text,
+            }
+        )
+
+    payload = {
+        "title": page.title(),
+        "url": page.url,
+        "frames": frames_payload,
+    }
+    with open(probe_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+
+
 def _login_inputs_not_found(
     log_path: str,
     critical_path: str,
@@ -150,6 +260,7 @@ def _login_inputs_not_found(
     _log_event(log_path, f"{last_step}: {message}")
     _log_critical(critical_path, f"{last_step}: {message}")
     screenshot_path = _take_screenshot(page, screens_dir, last_step)
+    _write_login_probe(log_path, page)
     return PortalRunResult(
         status="failed",
         last_step=last_step,
@@ -243,6 +354,7 @@ def run_portal_flow(
             browser = playwright.chromium.launch(headless=False)
             page = browser.new_page()
             page.goto(url, timeout=30_000)
+            page.wait_for_load_state("domcontentloaded")
             if debug:
                 _take_screenshot(page, screens_dir, "STEP_01_OPEN_URL")
 
@@ -258,12 +370,20 @@ def run_portal_flow(
                 _log_event(log_path, "STEP_02_LOGIN_DETECTION: Using AUTO login detection")
 
             username_locator = _locator_from_selector(page, username_selector)
+            password_locator = _locator_from_selector(page, password_selector)
+            submit_locator = _locator_from_selector(page, submit_selector)
+
+            if not username_locator or not password_locator:
+                detected = find_login_in_any_frame(page)
+                if detected:
+                    _, username_locator, password_locator, detected_submit = detected
+                    if not submit_locator:
+                        submit_locator = detected_submit
+
             if not username_locator:
                 username_locator = _auto_detect_username(page)
-            password_locator = _locator_from_selector(page, password_selector)
             if not password_locator:
                 password_locator = _auto_detect_password(page)
-            submit_locator = _locator_from_selector(page, submit_selector)
             if not submit_locator:
                 submit_locator = _auto_detect_submit(page)
 
