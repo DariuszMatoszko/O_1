@@ -6,3 +6,7 @@
 - Zaktualizowano runner Playwright o kroki automatyzacji, logi sesji oraz brakujące selektory.
 - Dodano skrypty pomocnicze w `tools/` oraz `.gitignore` dla danych runtime.
 - Jak testować: uruchom `RUN_F001.bat` lub `RUN_F001.vbs`, wybierz powiat, wpisz numer GKN i kliknij START.
+
+## 2026-01-29
+- Naprawa: logowanie działa bez selectors.json (auto wykrywanie Użytkownik/Hasło/Zaloguj).
+- Powód: STEP_02_MISSING_SELECTOR.

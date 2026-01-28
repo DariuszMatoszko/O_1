@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
+
+from runtime_utils import load_json, portals_path
 
 
 @dataclass
@@ -41,6 +45,119 @@ def _take_screenshot(page: Any, screens_dir: str, step: str) -> Optional[str]:
         return screenshot_path
     except Exception:
         return None
+
+
+def _load_portal_key(session_info: dict[str, str]) -> Optional[str]:
+    run_path = session_info.get("run_path")
+    if not run_path or not os.path.exists(run_path):
+        return None
+    try:
+        with open(run_path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data.get("portal_key")
+    except Exception:
+        return None
+
+
+def _resolve_portal_data(portal_data: dict[str, Any], portal_key: Optional[str]) -> dict[str, Any]:
+    if not portal_data:
+        return {}
+    if any(key in portal_data for key in ("url", "login", "password")):
+        return portal_data
+    if not portal_key:
+        return {}
+    candidates = [portal_key, portal_key.upper(), portal_key.lower()]
+    for candidate in candidates:
+        value = portal_data.get(candidate)
+        if isinstance(value, dict):
+            return value
+    lowered = portal_key.lower()
+    for key, value in portal_data.items():
+        if isinstance(key, str) and key.lower() == lowered and isinstance(value, dict):
+            return value
+    return {}
+
+
+def _first_visible(locator: Any) -> Any:
+    try:
+        count = locator.count()
+    except Exception:
+        return None
+    for index in range(count):
+        item = locator.nth(index)
+        try:
+            if item.is_visible():
+                return item
+        except Exception:
+            continue
+    return None
+
+
+def _locator_from_selector(page: Any, selector: Optional[str]) -> Any:
+    if not selector:
+        return None
+    return _first_visible(page.locator(selector))
+
+
+def _auto_detect_username(page: Any) -> Any:
+    for label in ("Użytkownik", "Uzytkownik"):
+        locator = _first_visible(page.get_by_label(label, exact=False))
+        if locator:
+            return locator
+    for label in ("Użytkownik", "Uzytkownik"):
+        locator = _first_visible(
+            page.locator(
+                f"xpath=//*[contains(normalize-space(.), '{label}')]/following::input[1]"
+            )
+        )
+        if locator:
+            return locator
+    return _first_visible(page.locator("input:not([type='password'])"))
+
+
+def _auto_detect_password(page: Any) -> Any:
+    locator = _first_visible(page.locator("input[type='password']"))
+    if locator:
+        return locator
+    for label in ("Hasło", "Haslo"):
+        locator = _first_visible(
+            page.locator(
+                f"xpath=//*[contains(normalize-space(.), '{label}')]/following::input[1]"
+            )
+        )
+        if locator:
+            return locator
+    return None
+
+
+def _auto_detect_submit(page: Any) -> Any:
+    locator = _first_visible(
+        page.get_by_role("button", name=re.compile("Zaloguj|Loguj", re.I))
+    )
+    if locator:
+        return locator
+    return _first_visible(page.get_by_text("Zaloguj", exact=False))
+
+
+def _login_inputs_not_found(
+    log_path: str,
+    critical_path: str,
+    page: Any,
+    screens_dir: str,
+) -> PortalRunResult:
+    last_step = "STEP_02_LOGIN_INPUTS_NOT_FOUND"
+    message = "Nie znalazłem pól logowania automatycznie"
+    _log_event(log_path, f"{last_step}: {message}")
+    _log_critical(critical_path, f"{last_step}: {message}")
+    screenshot_path = _take_screenshot(page, screens_dir, last_step)
+    return PortalRunResult(
+        status="failed",
+        last_step=last_step,
+        message=message,
+        detail="login_inputs",
+        found=False,
+        screenshot_path=screenshot_path,
+    )
 
 
 def _load_playwright():
@@ -100,6 +217,12 @@ def run_portal_flow(
             found=False,
         )
 
+    portal_key = _load_portal_key(session_info)
+    portal_data = _resolve_portal_data(portal_data, portal_key)
+    if not portal_data and portal_key:
+        portals = load_json(portals_path(), {})
+        portal_data = _resolve_portal_data(portals, portal_key)
+
     url = portal_data.get("url")
     login = portal_data.get("login")
     password = portal_data.get("password")
@@ -126,27 +249,43 @@ def run_portal_flow(
             username_selector = selectors.get("login_username")
             password_selector = selectors.get("login_password")
             submit_selector = selectors.get("login_submit")
-            if not username_selector:
-                return _missing_selector_result(
-                    "STEP_02", "login_username", log_path, critical_path, page, screens_dir
+            if username_selector and password_selector and submit_selector:
+                _log_event(
+                    log_path,
+                    f"STEP_02_LOGIN_DETECTION: Using selector login_username={username_selector}",
                 )
-            if not password_selector:
-                return _missing_selector_result(
-                    "STEP_02", "login_password", log_path, critical_path, page, screens_dir
-                )
-            if not submit_selector:
-                return _missing_selector_result(
-                    "STEP_03", "login_submit", log_path, critical_path, page, screens_dir
+            else:
+                _log_event(log_path, "STEP_02_LOGIN_DETECTION: Using AUTO login detection")
+
+            username_locator = _locator_from_selector(page, username_selector)
+            if not username_locator:
+                username_locator = _auto_detect_username(page)
+            password_locator = _locator_from_selector(page, password_selector)
+            if not password_locator:
+                password_locator = _auto_detect_password(page)
+            submit_locator = _locator_from_selector(page, submit_selector)
+            if not submit_locator:
+                submit_locator = _auto_detect_submit(page)
+
+            if not username_locator or not password_locator:
+                return _login_inputs_not_found(
+                    log_path, critical_path, page, screens_dir
                 )
 
             _log_event(log_path, "STEP_02_LOGIN_FILL: Filling login form.")
-            page.fill(username_selector, login)
-            page.fill(password_selector, password)
+            username_locator.fill(login)
+            password_locator.fill(password)
             if debug:
                 _take_screenshot(page, screens_dir, "STEP_02_LOGIN_FILL")
 
             _log_event(log_path, "STEP_03_LOGIN_SUBMIT: Submitting login form.")
-            page.click(submit_selector)
+            if submit_locator:
+                submit_locator.click()
+            else:
+                try:
+                    password_locator.press("Enter")
+                except Exception:
+                    page.keyboard.press("Enter")
             page.wait_for_timeout(2_000)
 
             password_error_selector = selectors.get("password_error")
