@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import threading
 import tkinter as tk
+from pathlib import Path
+from typing import Optional
 from tkinter import messagebox, ttk
 
 from runtime_utils import (
@@ -11,6 +13,7 @@ from runtime_utils import (
     create_session,
     ensure_runtime_files,
     load_json,
+    panel_state_path,
     portals_path,
     read_latest_session,
     save_json,
@@ -42,14 +45,17 @@ class F001Panel:
         self.edit_mode = False
         self.password_retry = False
         self.pending_retry_number: str | None = None
+        self.session_root: Optional[str] = None
+        self.session_info: dict[str, str] = {}
 
         ensure_runtime_files()
         cleanup_sessions()
-        self.session_root = create_session()
-        self.session_info = session_paths(self.session_root)
 
         self.portals = load_json(portals_path(), {})
         self.selectors = load_json(selectors_path(), {})
+        self.state_path = panel_state_path()
+        self.panel_state = load_json(self.state_path, {})
+        self.case_dir_var = tk.StringVar(value=self.panel_state.get("last_case_dir", ""))
 
         self._build_ui()
 
@@ -138,6 +144,32 @@ class F001Panel:
             command=self._clear_session_data,
         ).pack(side="left", padx=5)
 
+        downloads_frame = ttk.Labelframe(self.root, text="Dane pobrane", padding=10)
+        downloads_frame.pack(fill="x", padx=10, pady=5)
+        ttk.Label(downloads_frame, text="Folder case (GKN):").grid(row=0, column=0, sticky="w")
+        case_entry = ttk.Entry(
+            downloads_frame, textvariable=self.case_dir_var, width=60, state="readonly"
+        )
+        case_entry.grid(row=0, column=1, sticky="w", padx=5)
+        ttk.Button(
+            downloads_frame,
+            text="Otwórz folder danych (GKN)",
+            command=self._open_case_folder,
+        ).grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Button(
+            downloads_frame, text="Otwórz meta.json", command=self._open_case_meta
+        ).grid(row=1, column=1, sticky="w", pady=5)
+        ttk.Button(
+            downloads_frame,
+            text="Otwórz polygon_coords.txt",
+            command=self._open_case_polygon,
+        ).grid(row=2, column=1, sticky="w", pady=5)
+        ttk.Button(
+            downloads_frame,
+            text="Otwórz folder sesji",
+            command=self._open_session_folder,
+        ).grid(row=2, column=0, sticky="w", pady=5)
+
     def _add_entry(self, parent: ttk.Frame, label: str, variable: tk.StringVar, show: str | None = None) -> None:
         row = ttk.Frame(parent)
         row.pack(fill="x", pady=2)
@@ -150,7 +182,8 @@ class F001Panel:
 
     def _select_portal(self, key: str) -> None:
         self.portal_key = key
-        update_run_info(self.session_root, {"portal_key": key})
+        if self.session_root:
+            update_run_info(self.session_root, {"portal_key": key})
         self._refresh_portal_view()
 
     def _refresh_portal_view(self) -> None:
@@ -221,6 +254,8 @@ class F001Panel:
         self.screenshot_var.set("")
         self.open_screenshot_button.state(["disabled"])
 
+        self.session_root = create_session(self.portal_key or "UNKNOWN", number)
+        self.session_info = session_paths(self.session_root)
         run_data = load_json(self.session_info["run_path"], {})
         run_count = run_data.get("run_count", 0) + 1
         update_run_info(
@@ -282,6 +317,14 @@ class F001Panel:
         self.password_retry = False
         self.pending_retry_number = None
 
+        if result.case_dir:
+            self._set_case_dir(result.case_dir, result.case_files or [])
+            if result.case_files:
+                key_files = ", ".join(Path(path).name for path in result.case_files)
+                self.message_var.set(f"Zapisano dane do: {result.case_dir} ({key_files})")
+            else:
+                self.message_var.set(f"Zapisano dane do: {result.case_dir}")
+
     def _open_screenshot(self) -> None:
         path = self.screenshot_var.get().strip()
         if path:
@@ -291,6 +334,27 @@ class F001Panel:
         session = read_latest_session()
         if session:
             _open_path(session)
+
+    def _open_case_folder(self) -> None:
+        case_dir = self.case_dir_var.get().strip()
+        if case_dir:
+            _open_path(case_dir)
+
+    def _open_case_meta(self) -> None:
+        case_dir = self.case_dir_var.get().strip()
+        if case_dir:
+            _open_path(os.path.join(case_dir, "meta.json"))
+
+    def _open_case_polygon(self) -> None:
+        case_dir = self.case_dir_var.get().strip()
+        if case_dir:
+            _open_path(os.path.join(case_dir, "polygon_coords.txt"))
+
+    def _set_case_dir(self, case_dir: str, files: list[str]) -> None:
+        self.case_dir_var.set(case_dir)
+        self.panel_state["last_case_dir"] = case_dir
+        self.panel_state["last_case_files"] = files
+        save_json(self.state_path, self.panel_state)
 
     def _clear_session_data(self) -> None:
         if not messagebox.askyesno("F001", "Usunąć tylko logi i screeny z sesji?"):

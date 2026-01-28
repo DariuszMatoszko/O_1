@@ -2,20 +2,34 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
-RUNTIME_ROOT = os.path.join(os.path.dirname(__file__), "_runtime")
-CONFIG_DIR = os.path.join(RUNTIME_ROOT, "config")
-STATE_DIR = os.path.join(RUNTIME_ROOT, "state")
-SHARED_DIR = os.path.join(RUNTIME_ROOT, "shared")
-SESSIONS_DIR = os.path.join(RUNTIME_ROOT, "sessions")
-LATEST_PATH = os.path.join(RUNTIME_ROOT, "LATEST.txt")
+
+def _find_repo_root(start_path: Path) -> Path:
+    for parent in [start_path, *start_path.parents]:
+        if (parent / ".git").exists():
+            return parent
+    if len(start_path.parents) > 2:
+        return start_path.parents[2]
+    return start_path.parent
+
+
+REPO_ROOT = _find_repo_root(Path(__file__).resolve())
+RUNTIME_ROOT = REPO_ROOT / "klocki" / "F001_runtime"
+CONFIG_DIR = RUNTIME_ROOT / "config"
+STATE_DIR = RUNTIME_ROOT / "state"
+SHARED_DIR = RUNTIME_ROOT / "shared"
+SESSIONS_DIR = RUNTIME_ROOT / "sessions"
+CASES_DIR = RUNTIME_ROOT / "cases"
+LATEST_PATH = RUNTIME_ROOT / "LATEST.txt"
 
 
 def ensure_runtime_dirs() -> None:
-    for path in (CONFIG_DIR, STATE_DIR, SHARED_DIR, SESSIONS_DIR):
+    for path in (CONFIG_DIR, STATE_DIR, SHARED_DIR, SESSIONS_DIR, CASES_DIR):
         os.makedirs(path, exist_ok=True)
 
 
@@ -33,15 +47,19 @@ def save_json(path: str, payload: Any) -> None:
 
 
 def selectors_path() -> str:
-    return os.path.join(CONFIG_DIR, "selectors.json")
+    return os.fspath(CONFIG_DIR / "selectors.json")
 
 
 def portals_path() -> str:
-    return os.path.join(STATE_DIR, "portals.json")
+    return os.fspath(STATE_DIR / "portals.json")
 
 
 def shared_state_path() -> str:
-    return os.path.join(SHARED_DIR, "shared_state.json")
+    return os.fspath(SHARED_DIR / "shared_state.json")
+
+
+def panel_state_path() -> str:
+    return os.fspath(STATE_DIR / "F001_state.json")
 
 
 def ensure_runtime_files() -> None:
@@ -66,31 +84,54 @@ def ensure_runtime_files() -> None:
         save_json(shared_state_path(), {})
 
 
-def _session_root(date_str: str, time_str: str, portal_key: str) -> str:
-    folder_name = f"{time_str}_{portal_key}"
-    return os.path.join(SESSIONS_DIR, date_str, folder_name)
+def sanitize_gkn(gkn: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", gkn or "")
+    return cleaned.strip("_") or "UNKNOWN"
 
 
-def create_session(portal_key: str = "UNKNOWN") -> str:
+def _session_root(date_str: str, time_str: str, portal_key: str, gkn: str) -> str:
+    portal = (portal_key or "UNKNOWN").upper()
+    folder_name = f"{time_str}_{portal}_{sanitize_gkn(gkn)}"
+    return os.fspath(SESSIONS_DIR / date_str / folder_name)
+
+
+def create_session(portal_key: str = "UNKNOWN", gkn: str = "UNKNOWN") -> str:
     ensure_runtime_files()
     now = datetime.now()
     date_str = now.strftime("%Y-%m-%d")
     time_str = now.strftime("%H%M%S")
-    session_root = _session_root(date_str, time_str, portal_key)
+    session_root = _session_root(date_str, time_str, portal_key, gkn)
     logs_dir = os.path.join(session_root, "logs")
     screens_dir = os.path.join(session_root, "screens")
+    dumps_dir = os.path.join(session_root, "dumps")
+    downloads_dir = os.path.join(session_root, "downloads")
     os.makedirs(logs_dir, exist_ok=True)
     os.makedirs(screens_dir, exist_ok=True)
+    os.makedirs(dumps_dir, exist_ok=True)
+    os.makedirs(downloads_dir, exist_ok=True)
     run_path = os.path.join(session_root, "run.json")
     save_json(
         run_path,
         {
             "session_started_at": now.isoformat(timespec="seconds"),
             "portal_key": portal_key,
+            "gkn": gkn,
             "run_count": 0,
             "last_number": None,
             "last_status": None,
             "last_step": None,
+        },
+    )
+    manifest_path = os.path.join(session_root, "manifest.json")
+    save_json(
+        manifest_path,
+        {
+            "status": "init",
+            "last_step": None,
+            "portal_key": portal_key,
+            "gkn": gkn,
+            "urls": [],
+            "files": [],
         },
     )
     start_log_path = os.path.join(logs_dir, "F001_start.log")
@@ -111,13 +152,18 @@ def update_run_info(session_root: str, updates: dict[str, Any]) -> None:
 def session_paths(session_root: str) -> dict[str, str]:
     logs_dir = os.path.join(session_root, "logs")
     screens_dir = os.path.join(session_root, "screens")
+    dumps_dir = os.path.join(session_root, "dumps")
+    downloads_dir = os.path.join(session_root, "downloads")
     return {
         "session_root": session_root,
         "logs_dir": logs_dir,
         "screens_dir": screens_dir,
+        "dumps_dir": dumps_dir,
+        "downloads_dir": downloads_dir,
         "log_path": os.path.join(logs_dir, "F001.log"),
         "critical_path": os.path.join(logs_dir, "F001_critical.md"),
         "run_path": os.path.join(session_root, "run.json"),
+        "manifest_path": os.path.join(session_root, "manifest.json"),
     }
 
 
@@ -156,3 +202,15 @@ def read_latest_session() -> str | None:
         return None
     with open(LATEST_PATH, "r", encoding="utf-8") as handle:
         return handle.read().strip() or None
+
+
+def update_manifest(session_root: str, updates: dict[str, Any]) -> None:
+    manifest_path = os.path.join(session_root, "manifest.json")
+    data = load_json(manifest_path, {})
+    data.update(updates)
+    save_json(manifest_path, data)
+
+
+def case_root(portal_key: str, gkn: str) -> str:
+    portal = (portal_key or "unknown").lower()
+    return os.fspath(CASES_DIR / portal / sanitize_gkn(gkn))

@@ -5,12 +5,19 @@ import json
 import os
 import re
 import random
+import shutil
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
 
-from runtime_utils import load_json, portals_path
+from runtime_utils import (
+    case_root,
+    load_json,
+    portals_path,
+    sanitize_gkn,
+    update_manifest,
+)
 
 
 @dataclass
@@ -21,6 +28,8 @@ class PortalRunResult:
     detail: str
     found: bool
     screenshot_path: Optional[str] = None
+    case_dir: Optional[str] = None
+    case_files: Optional[list[str]] = None
 
 
 def _log_event(log_path: str, message: str) -> None:
@@ -621,6 +630,196 @@ def _export_work_artifacts(
     return None
 
 
+def _normalize_label(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _parse_polygon_coords(raw_text: str) -> list[list[list[float]]]:
+    text = (raw_text or "").strip()
+    if not text:
+        return []
+    upper = text.upper()
+    if "POLYGON" in upper:
+        groups = re.findall(r"\(([^()]+)\)", text)
+        polygons: list[list[list[float]]] = []
+        for group in groups:
+            points: list[list[float]] = []
+            for pair in group.split(","):
+                numbers = re.findall(r"-?\d+(?:[.,]\d+)?", pair)
+                if len(numbers) < 2:
+                    continue
+                x = float(numbers[0].replace(",", "."))
+                y = float(numbers[1].replace(",", "."))
+                points.append([x, y])
+            if points:
+                polygons.append(points)
+        if polygons:
+            return polygons
+    numbers = re.findall(r"-?\d+(?:[.,]\d+)?", text)
+    points = []
+    for idx in range(0, len(numbers) - 1, 2):
+        x = float(numbers[idx].replace(",", "."))
+        y = float(numbers[idx + 1].replace(",", "."))
+        points.append([x, y])
+    return [points] if points else []
+
+
+def _write_text(path: str, content: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
+def _copy_if_exists(source_path: str, destination_path: str) -> None:
+    if os.path.exists(source_path):
+        os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+        shutil.copyfile(source_path, destination_path)
+
+
+def _postprocess_case(
+    page: Any,
+    frame: Any,
+    number: str,
+    portal_key: str,
+    session_info: dict[str, str],
+) -> tuple[Optional[str], list[str]]:
+    case_dir = case_root(portal_key, number)
+    dumps_dir = session_info["dumps_dir"]
+    downloads_dir = session_info["downloads_dir"]
+    os.makedirs(case_dir, exist_ok=True)
+    os.makedirs(downloads_dir, exist_ok=True)
+
+    main_html_path = os.path.join(dumps_dir, "main.html")
+    main_text_path = os.path.join(dumps_dir, "main.txt")
+    frame_html_path = os.path.join(dumps_dir, "frame_centr.html")
+    frame_text_path = os.path.join(dumps_dir, "frame_centr.txt")
+
+    try:
+        _write_text(main_html_path, page.content())
+    except Exception:
+        _write_text(main_html_path, "")
+    try:
+        _write_text(main_text_path, page.inner_text("body"))
+    except Exception:
+        _write_text(main_text_path, "")
+    if frame:
+        try:
+            _write_text(frame_html_path, frame.content())
+        except Exception:
+            _write_text(frame_html_path, "")
+        try:
+            _write_text(frame_text_path, frame.inner_text("body"))
+        except Exception:
+            _write_text(frame_text_path, "")
+    else:
+        _write_text(frame_html_path, "")
+        _write_text(frame_text_path, "")
+
+    _copy_if_exists(main_html_path, os.path.join(case_dir, "main.html"))
+    _copy_if_exists(main_text_path, os.path.join(case_dir, "main.txt"))
+    _copy_if_exists(frame_html_path, os.path.join(case_dir, "work_frame.html"))
+    _copy_if_exists(frame_text_path, os.path.join(case_dir, "work_frame.txt"))
+
+    meta_path = os.path.join(case_dir, "meta.json")
+    meta: dict[str, str] = {}
+    if frame:
+        table_rows = frame.locator("#dane_podstawowe_div table tr")
+        try:
+            row_count = table_rows.count()
+        except Exception:
+            row_count = 0
+        for idx in range(row_count):
+            row = table_rows.nth(idx)
+            try:
+                key = row.locator("td").nth(0).inner_text()
+                value = row.locator("td").nth(1).inner_text()
+            except Exception:
+                continue
+            key = _normalize_label(key)
+            value = _normalize_label(value)
+            if key:
+                meta[key] = value
+    with open(meta_path, "w", encoding="utf-8") as handle:
+        json.dump(meta, handle, ensure_ascii=False, indent=2)
+
+    coords_path = os.path.join(case_dir, "polygon_coords.txt")
+    coords_json_path = os.path.join(case_dir, "polygon_coords.json")
+    coords_text = ""
+    if frame:
+        try:
+            coords_text = frame.locator("#pokaz_obszary").text_content() or ""
+        except Exception:
+            coords_text = ""
+        if not coords_text.strip():
+            toggle = _first_visible(
+                frame.locator("input[value*='Pokaż/ukryj współrzędne']")
+            )
+            if toggle:
+                try:
+                    toggle.click()
+                    frame.wait_for_timeout(300)
+                except Exception:
+                    pass
+                try:
+                    coords_text = frame.locator("#pokaz_obszary").text_content() or ""
+                except Exception:
+                    coords_text = ""
+    _write_text(coords_path, coords_text)
+    with open(coords_json_path, "w", encoding="utf-8") as handle:
+        json.dump(_parse_polygon_coords(coords_text), handle, ensure_ascii=False, indent=2)
+
+    downloaded_files: list[str] = []
+    if frame:
+        download_button = _first_visible(
+            frame.locator("input[value*='Pobierz poligon/poligony']")
+        )
+        if download_button:
+            try:
+                with page.expect_download(timeout=5000) as download_info:
+                    download_button.click()
+                download = download_info.value
+                filename = download.suggested_filename or "polygon.zip"
+                session_download_path = os.path.join(downloads_dir, filename)
+                case_download_dir = os.path.join(case_dir, "downloads")
+                os.makedirs(case_download_dir, exist_ok=True)
+                download.save_as(session_download_path)
+                shutil.copyfile(
+                    session_download_path,
+                    os.path.join(case_download_dir, filename),
+                )
+                downloaded_files.append(os.path.join(case_download_dir, filename))
+            except Exception:
+                pass
+
+    key_files = [
+        os.path.join(case_dir, "meta.json"),
+        os.path.join(case_dir, "polygon_coords.txt"),
+        os.path.join(case_dir, "polygon_coords.json"),
+    ]
+    key_files.extend(downloaded_files)
+    urls: list[str] = []
+    try:
+        urls.append(page.url)
+    except Exception:
+        pass
+    if frame:
+        try:
+            urls.append(frame.url)
+        except Exception:
+            pass
+    update_manifest(
+        session_info["session_root"],
+        {
+            "status": "postprocess_ok",
+            "last_step": "POSTPROCESS",
+            "gkn": sanitize_gkn(number),
+            "urls": [url for url in urls if url],
+            "files": key_files,
+        },
+    )
+    return case_dir, key_files
+
+
 def run_portal_flow(
     number: str,
     portal_data: dict[str, str],
@@ -905,6 +1104,15 @@ def run_portal_flow(
                 screens_dir,
                 log_path,
             )
+            case_dir = None
+            case_files: list[str] = []
+            try:
+                if portal_key:
+                    case_dir, case_files = _postprocess_case(
+                        page, frame, number, portal_key, session_info
+                    )
+            except Exception as exc:
+                _log_event(log_path, f"POSTPROCESS_FAILED: {exc}")
             browser.close()
             return PortalRunResult(
                 status="success",
@@ -913,6 +1121,8 @@ def run_portal_flow(
                 detail=number,
                 found=True,
                 screenshot_path=screenshot_path,
+                case_dir=case_dir,
+                case_files=case_files or None,
             )
     except PlaywrightTimeout as exc:
         _log_event(log_path, f"STEP_99_TIMEOUT: {exc}")
