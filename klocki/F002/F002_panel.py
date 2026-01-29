@@ -6,11 +6,13 @@ import math
 import os
 import subprocess
 import threading
+import traceback
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import requests
 import tkinter as tk
 from tkinter import ttk
 
@@ -46,8 +48,16 @@ def _ensure_runtime() -> None:
 def _load_json(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception as exc:
+        # Nie blokuj startu panelu jeśli plik JSON jest uszkodzony.
+        try:
+            _log(f"JSON load error: {path} | {exc}")
+        except Exception:
+            pass
+        return default
 
 
 def _save_json(path: Path, payload: Any) -> None:
@@ -258,9 +268,16 @@ def _parse_uldk_response(text: str) -> dict[str, str | None]:
 
 def _query_uldk(request_name: str, point: list[float], srid: int) -> dict[str, str | None]:
     xy = f"{point[0]},{point[1]},{srid}"
-    params = {"request": request_name, "xy": xy}
-    response = requests.get(ULDK_BASE_URL, params=params, timeout=10)
-    return _parse_uldk_response(response.text)
+    query = urllib.parse.urlencode({"request": request_name, "xy": xy})
+    url = f"{ULDK_BASE_URL}?{query}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "OPERAT-V2/F002"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            text = resp.read().decode("utf-8", errors="replace")
+        return _parse_uldk_response(text)
+    except Exception as exc:
+        _log(f"ULDK error {request_name} xy={xy} | {exc}")
+        return {"raw": str(exc), "status": None, "teryt": None, "name": None}
 
 
 def _write_csv(path: Path, communes: dict[str, str], regions: dict[str, str]) -> None:
@@ -525,5 +542,32 @@ def launch_panel() -> None:
     root.mainloop()
 
 
+def main() -> None:
+    try:
+        launch_panel()
+    except Exception as exc:
+        # Crash bez okna = brak informacji w Launcherze. Logujemy i pokazujemy błąd.
+        try:
+            _ensure_runtime()
+        except Exception:
+            pass
+        try:
+            _log("CRITICAL: F002 crash on startup")
+            for line in traceback.format_exc().splitlines():
+                _log(line)
+        except Exception:
+            pass
+        try:
+            from tkinter import messagebox
+
+            messagebox.showerror(
+                "F002",
+                f"F002 nie wystartował.\n\n{exc}\n\nSprawdź log: {F002_LOG}",
+            )
+        except Exception:
+            pass
+        raise
+
+
 if __name__ == "__main__":
-    launch_panel()
+    main()
