@@ -8,5 +8,14 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Runtime artifacts
+klocki/**/logs/screens/*.png
+klocki/**/logs/*.log
+klocki/**/export/**
+klocki/**/exports/**
+klocki/**/downloads/**
+klocki/**/runtime/**
+**/.cache/ms-playwright/**
+
 # F002 runtime
 klocki/F002_runtime/
